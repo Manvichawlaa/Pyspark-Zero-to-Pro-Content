@@ -1,0 +1,67 @@
+#Apache Spark: Open Source Framework/Large Scale Data Processing and Analysis/Follows Master Slave Architecture
+
+Spark Architecture — Quick Notes
+The Big Picture
+Spark follows a master-worker architecture. One node coordinates everything (Driver), the rest do the actual work (Executors).
+
+Your Code
+   ↓
+Driver (SparkContext / SparkSession)
+   ↓ sends tasks
+Cluster Manager (YARN / Kubernetes / Standalone)
+   ↓ allocates resources
+Executors (Worker Nodes)
+   ↓ run tasks, store data in partitions
+
+
+Driver:
+The brain. Runs your main() / notebook code
+Creates the SparkSession
+Builds the DAG, optimises it via Catalyst, breaks it into stages and tasks
+Sends tasks to executors, tracks progress
+Single point of failure — if driver dies, job dies
+
+Cluster Manager:
+Allocates resources (CPU, memory) across the cluster
+Options: YARN (Hadoop), Kubernetes, Mesos, Standalone
+At Optum/Databricks — this is managed for you automatically
+
+Executors:
+The workers. Each runs on a separate node
+Execute the tasks assigned by the driver
+Store partition data in memory (cache) or disk
+Send results back to the driver
+Each executor has a fixed number of cores and memory
+
+Tasks:
+Smallest unit of work
+One task = one partition of data
+Runs inside an executor core
+
+Key Concepts
+Partition:
+A chunk of data. One task processes one partition
+Default partition size ~128MB
+More partitions = more parallelism (up to a point)
+Too few = underutilised cluster. Too many = too much overhead
+
+DAG (Directed Acyclic Graph):
+The execution plan Spark builds from your transformations
+Split into stages at shuffle boundaries
+Visualise it in Spark UI → DAG Visualization tab
+
+Stage:
+A group of tasks that can run without a shuffle
+Narrow transformations (filter, map) → same stage
+Wide transformations (groupBy, join, distinct) → new stage
+
+Shuffle:
+Data moving across the network between stages
+Most expensive operation in Spark
+Triggered by: groupBy, join, distinct, repartition, orderBy
+Minimise shuffles = faster pipelines
+
+Lazy Evaluation:
+Transformations build a plan, nothing executes
+Execution only starts when an action is called (count, show, write)
+Allows Catalyst to optimise the full plan before running
