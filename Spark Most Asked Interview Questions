@@ -73,3 +73,106 @@ Key line: "Delta Lake gives us the reliability of a database with the scale of a
 
 How do you optimise a slow Spark job?
 Structured approach: 1) Open Spark UI — find the slowest stage, check shuffle read/write size. 2) Check for skew — one task taking 10x longer than others. 3) Check partition count — too few (underutilised) or too many (overhead). 4) Look for missing broadcast joins on small tables. 5) Check if expensive DataFrames are recomputed — add cache(). 6) Enable AQE if on Spark 3.x.
+
+What are the different join types in Spark? When do you use each?
+inner: only matching rows from both sides. left/right: all rows from one side, nulls for no match. full/outer: all rows from both sides. left_semi: rows from left where a match exists in right — no right columns returned. left_anti: rows from left where NO match in right. cross: cartesian product — every row with every row (dangerous at scale).
+df1.join(df2, "id", "inner")
+df1.join(df2, "id", "left")
+df1.join(df2, "id", "left_semi")   # like WHERE EXISTS in SQL
+df1.join(df2, "id", "left_anti")   # like WHERE NOT EXISTS in SQL
+left_semi and left_anti are the most underrated join types — interviewers love asking about them because most candidates don't know them. left_semi is more efficient than inner join when you only need left columns.
+
+What is a sort-merge join vs a broadcast join? How does Spark decide?
+Sort-merge join: both sides shuffled, sorted, then merged. Used when both DataFrames are large. Expensive due to shuffle. Broadcast join: small side sent to every executor, join happens locally — no shuffle at all. Spark automatically picks broadcast when a side is under spark.sql.autoBroadcastJoinThreshold (default 10MB). You can force it with broadcast().
+from pyspark.sql.functions import broadcast
+
+result = large_df.join(broadcast(small_df), "id")
+Say: "I always check table sizes before writing a join. If one side is a lookup/config table under 100MB I force a broadcast — it eliminates the shuffle entirely and is the single biggest performance win available."
+
+How do you handle duplicate column names after a join?
+When both DataFrames share a column name, Spark keeps both — causing ambiguity in subsequent operations. Three solutions: 1) alias the DataFrames and use qualified names, 2) drop the duplicate after join, 3) rename before joining.
+df1 = df1.alias("a")
+df2 = df2.alias("b")
+
+result = df1.join(df2, col("a.id") == col("b.id"), "inner") \
+            .select("a.id", "a.name", "b.salary")
+
+result = df1.join(df2, "id", "inner")
+result = result.drop(df2["salary"])
+Common production bug — leaving duplicate columns causes AnalysisException on the next filter or select. Always clean up immediately after a join. Mentioning this proactively in interviews shows production experience.
+
+What is a cross join and why is it dangerous?
+Cross join = cartesian product — every row in left matched with every row in right. 1000 rows x 1000 rows = 1,000,000 rows. At scale this causes OOM errors and cluster crashes. Spark requires explicit crossJoin() or setting spark.sql.crossJoin.enabled=true to prevent accidental cross joins.
+df1.crossJoin(df2)
+
+spark.conf.set("spark.sql.crossJoin.enabled", "true")
+
+Why is Parquet preferred over CSV in data pipelines?
+Parquet is columnar — reads only the columns you need, not entire rows. CSV is row-based — reads everything. Parquet also has: built-in compression (Snappy, GZIP), schema embedded in the file, predicate pushdown support (skip row groups that don't match filters), and much smaller file size. CSV has none of these.
+Key numbers to remember: Parquet is typically 5-10x smaller than CSV for the same data. Reading 3 columns from a 100-column Parquet file reads ~3% of the data. CSV reads 100%. This is why columnar matters at 5TB/day scale.
+
+What is partitioning in file storage and why does it matter?
+Partitioning organises files into folders by column value — e.g. year=2026/month=05/day=17/. When you filter on a partition column, Spark reads only the relevant folders (partition pruning) — skipping everything else. Without partitioning, Spark scans all files even if you only need one day's data.
+df.write \
+  .partitionBy("year", "month", "day") \
+  .format("parquet") \
+  .save("/mnt/data/events/")
+Common follow-up: "What column should you partition by?" — Partition on columns you filter by most often. High-cardinality columns (user_id) make poor partition keys — creates millions of tiny files. Date columns are the most common choice.
+
+What is the small file problem and how do you fix it?
+Too many small files = too many tasks, excessive metadata overhead, slow reads. Causes: over-partitioning, streaming micro-batches, high-cardinality partitionBy. Fixes: 1) coalesce() before writing to reduce output files, 2) Delta Lake OPTIMIZE command compacts small files, 3) repartition() on a lower-cardinality column.
+df.coalesce(10).write.format("parquet").save("/output/")
+
+spark.sql("OPTIMIZE delta.`/mnt/delta/table` ZORDER BY (date)")
+This is a real problem at scale. At Optum with 5TB/day, streaming pipelines can produce thousands of small files per hour. OPTIMIZE + ZORDER on Delta Lake is the standard fix on Databricks.
+
+What is schema evolution and how does Delta Lake handle it?
+Schema evolution = adding/changing columns in a table over time without breaking existing data. Plain Parquet fails if new columns appear. Delta Lake supports: mergeSchema (adds new columns automatically), overwriteSchema (replace schema entirely). Also enforces schema on write by default — bad data gets rejected before corrupting the table.
+df.write.format("delta") \
+  .option("mergeSchema", "true") \
+  .mode("append") \
+  .save("/mnt/delta/table")
+At Deloitte you built Medallion architecture pipelines — schema enforcement at Bronze and evolution at Silver is standard practice. Mention this real context.
+
+How do you pivot a DataFrame in PySpark?
+pivot() converts row values into columns — like PIVOT in SQL. Useful for turning category values into separate columns for reporting.
+df.groupBy("name") \
+  .pivot("dept", ["Engineering", "Marketing", "HR"]) \
+  .agg(sum("salary")) \
+  .show()
+Always pass the pivot values explicitly as a list — without them Spark runs an extra scan to find distinct values, which is expensive on large data.
+
+How do you handle null values in PySpark?
+from pyspark.sql.functions import col, isnan, when, coalesce, lit
+
+df.filter(col("salary").isNull())
+df.filter(col("salary").isNotNull())
+
+df.fillna(0, subset=["salary"])
+df.fillna({"salary": 0, "name": "unknown"})
+
+df.dropna(subset=["salary", "name"])
+df.dropna(how="all")
+
+df.withColumn("salary",
+    coalesce(col("salary"), col("default_salary"), lit(0)))
+coalesce() returns the first non-null value from a list — great for fallback logic. Don't confuse with coalesce() for partitions — same name, completely different function.
+
+How do you debug a slow Spark job?
+Structured approach: 1) Open Spark UI → Jobs tab, find the slowest job. 2) Go to Stages tab — find the stage with longest duration and highest shuffle read/write. 3) Check Tasks tab inside that stage — if one task takes 10x longer, it is skew. 4) Check GC time — high GC = memory pressure, increase executor memory or reduce partition size. 5) Check shuffle spill — data spilling to disk means not enough memory for the shuffle.
+Say this in interviews: "My first instinct is always Spark UI — specifically the Stages tab for shuffle size and the Tasks tab for skew. Code fixes come after I understand what's actually slow." This shows debugging maturity, not guesswork.
+
+What causes OutOfMemoryError in Spark and how do you fix it?
+Common causes: 1) collect() on large data — brings everything to driver. 2) Broadcasting a table that's too large. 3) Too few partitions — each task handles too much data. 4) Shuffle spill — not enough memory for sort/groupBy intermediate data. 5) Memory leak — not unpersisting cached DataFrames. Fixes: increase executor memory, increase partition count (repartition), reduce broadcast threshold, avoid collect() on large data.
+spark.conf.set("spark.executor.memory", "8g")
+spark.conf.set("spark.sql.shuffle.partitions", "400")
+spark.conf.set("spark.sql.autoBroadcastJoinThreshold", "50mb")
+Rule of thumb: partition size should be 128MB–256MB. If your data is 100GB with default 200 shuffle partitions, each partition is 500MB — too large. Set shuffle partitions to ~400-800 for that size.
+
+What is spark.sql.shuffle.partitions and what should you set it to?
+Controls how many partitions are created after a shuffle (groupBy, join). Default is 200 — fine for small data, terrible for large. Too low = large partitions, OOM risk. Too high = thousands of tiny tasks, overhead kills performance. Rule: target 128MB-256MB per partition. total_shuffle_data / target_partition_size = ideal partition count. With AQE enabled, Spark tunes this automatically.
+spark.conf.set("spark.sql.shuffle.partitions", "400")
+
+spark.conf.set("spark.sql.adaptive.enabled", "true")
+With AQE on (default in Databricks), you often don't need to manually tune this — but knowing the theory is what separates 3 YOE candidates from juniors in interviews.
+
