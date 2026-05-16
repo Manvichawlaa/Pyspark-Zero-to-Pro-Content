@@ -1,0 +1,75 @@
+What is lazy evaluation in Spark and why does it matter?
+Transformations (filter, map, join) build a logical plan but execute nothing. Execution only starts when an action is called (count, show, write). This lets Catalyst optimise the entire plan before running — e.g. pushing filters before joins to reduce data early.
+
+What is the difference between a transformation and an action?
+Transformations return a new DataFrame and are lazy — filter, select, join, groupBy, withColumn. Actions trigger execution and return a result — count, show, collect, write, take. Every Spark job ends with an action.
+
+What is a DAG in Spark? How is it split into stages?
+DAG = Directed Acyclic Graph. It's the execution plan Spark builds from your transformations. The DAG Scheduler splits it into stages at shuffle boundaries — every wide transformation (groupBy, join, distinct) creates a new stage. Within a stage, all tasks run in parallel.
+
+What is the difference between narrow and wide transformations?
+Narrow: each input partition maps to exactly one output partition. No data movement. Examples: filter, map, select, withColumn, union. Wide: output partitions depend on multiple input partitions — requires a shuffle (data moves across network). Examples: groupBy, join, distinct, repartition, orderBy.
+
+What does the Catalyst optimizer do?
+Catalyst takes your logical plan and applies optimization rules before execution: predicate pushdown (filters moved earlier), column pruning (unused columns dropped), join reordering, and constant folding. It then generates multiple physical plans and picks the cheapest one based on cost estimation.
+
+What is the difference between RDD, DataFrame, and Dataset?
+RDD: low-level, no schema, no Catalyst optimization, full control. DataFrame: distributed table with schema, Catalyst optimized, most common in PySpark. Dataset: type-safe DataFrame (Scala/Java only — not available in Python). In PySpark you almost always use DataFrames.
+
+How do you handle data skew in Spark?
+Skew = one partition has far more data than others, causing one task to run much longer. Solutions: 1) Salting — add a random prefix to the skewed key to spread data across more partitions. 2) Broadcast join — if one side is small, broadcast it to avoid shuffle entirely. 3) AQE skew join — Spark 3.x detects and splits skewed partitions automatically.
+from pyspark.sql.functions import col, rand, concat, lit
+
+df_salted = df.withColumn("salted_key",
+    concat(col("join_key"), lit("_"), (rand()*10).cast("int")))
+
+What is the difference between repartition() and coalesce()?
+repartition(n): full shuffle, evenly redistributes data, can increase or decrease partitions. coalesce(n): no shuffle, merges partitions locally, can only decrease partitions. Use coalesce when writing fewer output files (cheaper). Use repartition when you need even distribution before a heavy operation.
+
+What is a broadcast join and when do you use it?
+A broadcast join sends the smaller DataFrame to every executor, so the join happens locally without a shuffle. Use when one side is small (default threshold 10MB, configurable). Eliminates the most expensive operation in Spark.
+from pyspark.sql.functions import broadcast
+
+df_result = large_df.join(broadcast(small_df), "id")
+
+What is caching and when should you use it?
+cache() / persist() stores a DataFrame in memory so it's not recomputed on every action. Use when a DataFrame is used multiple times in the same job. Don't cache everything — it wastes memory and can spill to disk. Always unpersist() when done.
+df.cache()
+df.count()  # triggers caching
+df.filter(...).show()  # reads from cache
+df.unpersist()  # free memory
+
+Follow-up: "What's the difference between cache() and persist()?" — cache() = MEMORY_AND_DISK by default. persist() lets you specify storage level: MEMORY_ONLY, DISK_ONLY, MEMORY_AND_DISK, etc.
+
+What is AQE (Adaptive Query Execution)?
+AQE (Spark 3.0+) re-optimises the query plan at runtime using actual data statistics from completed stages. Three key features: 1) dynamically coalesces small shuffle partitions, 2) converts sort-merge joins to broadcast joins when a side turns out to be small, 3) handles skewed joins by splitting large partitions.
+Enable with: spark.conf.set("spark.sql.adaptive.enabled", "true"). On Databricks it's on by default. Mention this shows you're up to date with Spark 3.x.
+
+What is exactly-once semantics in Spark Streaming?
+Three delivery guarantees: at-most-once (data may be lost), at-least-once (data may be duplicated), exactly-once (data processed exactly once, no loss, no duplicates). Spark Structured Streaming achieves exactly-once by combining checkpointing (tracks offsets) with idempotent sinks or transactional writes.
+You have this on your CV — "built Kafka + Spark Structured Streaming pipelines with exactly-once delivery." Be ready to explain HOW: checkpointing + Kafka offset tracking + writing to Delta Lake (which supports ACID transactions).
+
+What is checkpointing in Spark Streaming?
+Checkpointing saves the state of a streaming query to durable storage (ADLS, S3, HDFS). Tracks: 1) offsets read from source (e.g. Kafka partition offsets), 2) intermediate state for stateful operations (aggregations, joins). On failure, the query restarts from the last checkpoint — no reprocessing from the beginning.
+df.writeStream \
+  .format("delta") \
+  .option("checkpointLocation", "/mnt/checkpoints/my_stream") \
+  .start("/mnt/output/my_table")
+
+What is watermarking and why is it needed?
+Watermarking handles late-arriving data in streaming. It tells Spark: "wait up to X time for late data, then discard anything older." Without watermarking, Spark would keep state for all past events forever, causing unbounded memory growth. Watermark = event_time threshold below which late records are dropped.
+df.withWatermark("event_time", "10 minutes") \
+  .groupBy(window(col("event_time"), "5 minutes")) \
+  .count()
+Key follow-up: "What's the difference between event time and processing time?" — Event time = when the event actually happened (in the data). Processing time = when Spark received/processed it. Always use event time for accurate analytics.
+
+How would you design a pipeline to process 5TB of data daily?
+This is literally your Optum experience. Structure your answer: 1) Ingestion — ADF to land raw data in ADLS Bronze layer. 2) Processing — Databricks PySpark with partitioning on date/region to enable partition pruning. 3) Optimisation — broadcast small lookup tables, use AQE, tune shuffle partitions. 4) Output — write to Delta Lake (Silver/Gold) with Z-ordering on query columns. 5) Monitoring — structured logging, alerting on SLA breaches, data quality checks.
+You have done this. Say: "This mirrors what I built at Optum — 5TB/day across PySpark pipelines on Databricks with ADF orchestration and Delta Lake as the storage layer." That answer is worth more than a textbook answer.
+
+What is Delta Lake and why use it over plain Parquet?
+Delta Lake adds ACID transactions, schema enforcement, time travel, and DML support (UPDATE, DELETE, MERGE) on top of Parquet files. Plain Parquet has none of these — no transactions, no updates, no rollback. Delta is the foundation of Medallion architecture (Bronze/Silver/Gold).
+Key line: "Delta Lake gives us the reliability of a database with the scale of a data lake — that's why it's the default storage format on Databricks." You used this at Deloitte — mention it.
+
+How do you optimise a slow Spark job?
+Structured approach: 1) Open Spark UI — find the slowest stage, check shuffle read/write size. 2) Check for skew — one task taking 10x longer than others. 3) Check partition count — too few (underutilised) or too many (overhead). 4) Look for missing broadcast joins on small tables. 5) Check if expensive DataFrames are recomputed — add cache(). 6) Enable AQE if on Spark 3.x.
